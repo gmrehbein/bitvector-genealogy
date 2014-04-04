@@ -20,8 +20,6 @@
 #include <boost/graph/connected_components.hpp>
 #include <boost/graph/prim_minimum_spanning_tree.hpp>
 
-
-using std::exception;
 using std::cout;
 using std::endl;
 using std::ifstream;
