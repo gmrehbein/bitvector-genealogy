@@ -33,7 +33,7 @@ int main(int argc, char* argv[])
   const size_t kGenomeLen = 10000;
   const int expected_value = 2000;
   const uint16_t std_deviation = 40;
-  const char* filename = "test/test.data";
+  const char* filename = "test.data";
   const uint8_t expected_max_degree = 10;
 
   typedef adjacency_list<vecS, vecS, undirectedS,
