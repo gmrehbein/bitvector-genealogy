@@ -5,6 +5,9 @@
 // Copyright (C) 2014 Gregory Rehbein <gmrehbein@gmail.com>
 //----------------------------------------------------------
 
+// C
+#include <cstdlib>
+
 // C++
 #include <vector>
 #include <iostream>
