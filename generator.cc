@@ -43,6 +43,7 @@ int main()
 
   mt19937 mutation_gen(rd());
   mt19937 parent_gen(rd());
+  srand(rd()); // for random_shuffle
 
   bernoulli_distribution<> coin_toss(0.2);
 
