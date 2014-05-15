@@ -4,9 +4,6 @@
 // Copyright (C) 2014 Gregory Rehbein <gmerehbein@gmail.com>
 //-----------------------------------------------------------
 
-// C
-#include <ctime>
-
 // C++
 #include <fstream>
 #include <iostream>
@@ -50,10 +47,6 @@ int main(int argc, char* argv[])
 
   char genome[kGenomeLen + 1];
   dynamic_bitset<> population[kGenomeLen];
-
-  clock_t start_time, end_time;
-  double elapsed_time_seconds;
-  start_time = clock();
 
   ifstream ifs(filename, ifstream::in);
   int index = 0;
@@ -101,10 +94,6 @@ int main(int argc, char* argv[])
   prim_minimum_spanning_tree(graph, *v_max, &p[0], distance, 
                              weight_map, index_map, default_dijkstra_visitor());
   
-  end_time = clock();
-  elapsed_time_seconds = (static_cast<double>(end_time - start_time))/ CLOCKS_PER_SEC;
-  cout << elapsed_time_seconds << endl;
-
   for (size_t i = 0; i != p.size(); ++i) {
     if (p[i] != i)
       cout << p[i] << endl;
