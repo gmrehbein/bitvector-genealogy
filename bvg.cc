@@ -1,7 +1,7 @@
 // ---------------------------------------------------------
 // File: bvg.cc
 // Author: Gregory Rehbein
-// Copyright (C) 2014 Gregory Rehbein <gmerehbein@gmail.com>
+// Copyright (C) 2014 Gregory Rehbein <gmrehbein@gmail.com>
 //-----------------------------------------------------------
 
 // C++
