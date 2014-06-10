@@ -46,7 +46,6 @@ public:
   {
     const int expected_value = 2000;
     const int std_deviation = 40;
-    // const dynamic_bitset<>* my_population = m_population;
     for (int j = r.end() - 1; j >= r.begin(); --j) {
       for (int i = j - 1; i > -1; --i) {
         dynamic_bitset<> hamming(m_population[j] ^ m_population[i]);
