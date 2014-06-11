@@ -6,10 +6,10 @@
 
 // C++
 #include <fstream>
+#include <tuple>
 
 // C
 #include <cstdio>
-#include <cstdint>
 
 // Boost
 #include <boost/dynamic_bitset.hpp>
@@ -28,13 +28,8 @@ using std::ifstream;
 using namespace boost;
 using namespace tbb;
 
-namespace
-{
-concurrent_queue<uint64_t> edge_set;
-const uint64_t LOW_INDEX_MASK  = 0xFFFFULL;
-const uint64_t HIGH_INDEX_MASK = 0xFFFFULL << 16;
-const uint64_t DISTANCE_MASK =   0xFFFFULL << 32;
-}
+namespace {
+concurrent_queue<std::tuple<int,int,int> > edge_set;
 
 class CalculateEdgeWeights
 {
@@ -49,15 +44,14 @@ public:
     for (int j = r.end() - 1; j >= r.begin(); --j) {
       for (int i = j - 1; i > -1; --i) {
         dynamic_bitset<> hamming(m_population[j] ^ m_population[i]);
-        uint64_t distance = abs(hamming.count() - expected_value);
-        if (distance <= 5*std_deviation) {
-          uint64_t compressed_triple = (distance << 32) | (j << 16) | i;
-          edge_set.push(compressed_triple);
-        }
+		int distance = abs(hamming.count() - expected_value);
+        if (distance <= 5*std_deviation)
+			edge_set.push({i,j,distance});
       }
     }
   }
 };
+}
 
 int main(int argc, char* argv[])
 {
@@ -65,7 +59,7 @@ int main(int argc, char* argv[])
 
   const size_t kGenomeLen = 10000;
   const char* filename = "test.data";
-  const uint8_t expected_max_degree = 10;
+  const size_t expected_max_degree = 10;
 
   typedef adjacency_list<vecS, vecS, undirectedS,
           property<vertex_distance_t, int>,
@@ -77,7 +71,7 @@ int main(int argc, char* argv[])
   Graph graph(VERTEX_COUNT);
 
   property_map<Graph, edge_weight_t>::type weight_map = get(edge_weight, graph);
-  vector<Vertex> p(num_vertices(graph));
+  vector<Vertex> p(num_vertices(graph)); // predecessor map
 
   char genome[kGenomeLen + 1];
   dynamic_bitset<> population[VERTEX_COUNT];
@@ -98,19 +92,17 @@ int main(int argc, char* argv[])
   parallel_for(blocked_range<int> (0, VERTEX_COUNT),
                CalculateEdgeWeights(population),
                auto_partitioner());
-
-  uint64_t compressed_triple;
-  while (edge_set.try_pop(compressed_triple)) {
-    graph_traits<Graph>::edge_descriptor e;
-    bool inserted;
-    boost::tie(e,inserted) = add_edge(
-                               compressed_triple & LOW_INDEX_MASK,
-                               (compressed_triple & HIGH_INDEX_MASK) >> 16,
-                               graph);
-    weight_map[e] = (compressed_triple & DISTANCE_MASK) >> 32;
+  
+  std::tuple<int,int,int> triple;
+  while (edge_set.try_pop(triple)) {
+	  graph_traits<Graph>::edge_descriptor e;
+	  bool inserted;
+      tie(e,inserted) = add_edge(std::get<0>(triple), std::get<1>(triple), graph);
+      weight_map[e] = std::get<2>(triple); 	
   }
 
-  // Search for the vertex with the highest degree
+  // Search for the vertex *v_max with the highest degree.
+  // Nominate this as the root vertex in Prim's MST algorithm
   graph_traits<Graph>::vertex_iterator vi_curr, vi_end, v_max;
   graph_traits<Graph>::degree_size_type max_degree = 0;
   graph_traits<Graph>::degree_size_type curr_degree = 0;
@@ -121,11 +113,14 @@ int main(int argc, char* argv[])
       v_max = vi_curr;
     }
   }
+
+  // Compute the minimum spanning tree with root vertex *v_max
   property_map<Graph, vertex_distance_t>::type distance = get(vertex_distance, graph);
   property_map<Graph, vertex_index_t>::type index_map = get(vertex_index, graph);
   prim_minimum_spanning_tree(graph, *v_max, &p[0], distance,
                              weight_map, index_map, default_dijkstra_visitor());
 
+  // Output result
   for (size_t i = 0; i != p.size(); ++i) {
     if (p[i] != i)
       printf("%zu\n", p[i]);
