@@ -1,15 +1,17 @@
 // ---------------------------------------------------------
-// File: bvg.cc
+// File: bvg.cc (Modernized to C++23)
 // Author: Gregory Rehbein
-// Copyright (C) 2014 Gregory Rehbein <gmrehbein@gmail.com>
-//-----------------------------------------------------------
+// ---------------------------------------------------------
 
-// C++
 #include <fstream>
 #include <tuple>
-
-// C
+#include <vector>
+#include <string>
 #include <cstdio>
+#include <cstdlib>
+#include <ranges>
+#include <algorithm>
+#include <iostream>
 
 // Boost
 #include <boost/dynamic_bitset.hpp>
@@ -17,114 +19,110 @@
 #include <boost/graph/prim_minimum_spanning_tree.hpp>
 
 // TBB
-#include <tbb/task_scheduler_init.h>
+#include <tbb/global_control.h>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
 #include <tbb/concurrent_queue.h>
 
-using std::vector;
-using std::ifstream;
-
+using namespace std;
 using namespace boost;
 using namespace tbb;
 
-namespace {
-concurrent_queue<std::tuple<int,int,int> > edge_set;
+namespace
+{
+using Genome = dynamic_bitset<>;
+using Edge = std::tuple<int, int, int>;
+
+concurrent_queue<Edge> edge_set;
 
 class CalculateEdgeWeights
 {
-  const dynamic_bitset<>* m_population;
+  const vector<Genome>& population_;
 
 public:
-  CalculateEdgeWeights(const dynamic_bitset<> population[]): m_population(population) {}
-  void operator() (const blocked_range<int>& r) const
+  CalculateEdgeWeights(const vector<Genome>& population) : population_(population) {}
+
+  void operator()(const blocked_range<int>& r) const
   {
-    const int expected_value = 2000;
-    const int std_deviation = 40;
+    constexpr int expected_value = 2000;
+    constexpr int std_deviation = 40;
+
     for (int j = r.end() - 1; j >= r.begin(); --j) {
-      for (int i = j - 1; i > -1; --i) {
-        dynamic_bitset<> hamming(m_population[j] ^ m_population[i]);
-		int distance = abs(hamming.count() - expected_value);
-        if (distance <= 5*std_deviation)
-			edge_set.push({i,j,distance});
+      for (int i = j - 1; i >= 0; --i) {
+        Genome hamming = population_[j] ^ population_[i];
+        int distance = abs(static_cast<int>(hamming.count()) - expected_value);
+        if (distance <= 5 * std_deviation)
+          edge_set.push({i, j, distance});
       }
     }
   }
 };
 }
 
-int main(int argc, char* argv[])
+int main()
 {
-  task_scheduler_init init;
+  global_control control(global_control::max_allowed_parallelism, std::thread::hardware_concurrency());
 
-  const size_t kGenomeLen = 10000;
-  const char* filename = "test.data";
-  const size_t expected_max_degree = 10;
+  constexpr size_t GENOME_SIZE = 10000;
+  constexpr size_t EXPECTED_MAX_DEGREE = 10;
+  constexpr size_t VERTEX_COUNT = GENOME_SIZE;
+  constexpr char input_filename[] = "test.data";
 
-  typedef adjacency_list<vecS, vecS, undirectedS,
-          property<vertex_distance_t, int>,
-          property<edge_weight_t, int> > Graph;
+  using Graph = adjacency_list<vecS, vecS, undirectedS,
+        property<vertex_distance_t, int>,
+        property<edge_weight_t, int>>;
 
-  typedef graph_traits<Graph>::vertex_descriptor Vertex;
+  using Vertex = graph_traits<Graph>::vertex_descriptor;
 
-  const size_t VERTEX_COUNT = kGenomeLen;
   Graph graph(VERTEX_COUNT);
+  auto weight_map = get(edge_weight, graph);
+  vector<Vertex> predecessors(VERTEX_COUNT);  // Predecessor map
 
-  property_map<Graph, edge_weight_t>::type weight_map = get(edge_weight, graph);
-  vector<Vertex> p(num_vertices(graph)); // predecessor map
+  // Read genome data
+  vector<Genome> population(VERTEX_COUNT, Genome(GENOME_SIZE));
+  ifstream ifs(input_filename);
+  string line;
+  size_t index = 0;
 
-  char genome[kGenomeLen + 1];
-  dynamic_bitset<> population[VERTEX_COUNT];
-
-  ifstream ifs(filename, ifstream::in);
-  int index = 0;
-  while (ifs.getline(genome, kGenomeLen + 1).good()) {
-    population[index].resize(kGenomeLen);
-    for (size_t i = 0; i < kGenomeLen; ++i) {
-      if ('1' == genome[i]) {
-        population[index].set(i);
-      }
+  while (getline(ifs, line) && index < VERTEX_COUNT) {
+    for (size_t i = 0; i < GENOME_SIZE; ++i) {
+      if (line[i] == '1') population[index].set(i);
     }
     ++index;
   }
-  ifs.close();
 
-  parallel_for(blocked_range<int> (0, VERTEX_COUNT),
+  parallel_for(blocked_range<int>(0, static_cast<int>(VERTEX_COUNT)),
                CalculateEdgeWeights(population),
                auto_partitioner());
-  
-  std::tuple<int,int,int> triple;
-  while (edge_set.try_pop(triple)) {
-	  graph_traits<Graph>::edge_descriptor e;
-	  bool inserted;
-      tie(e,inserted) = add_edge(std::get<0>(triple), std::get<1>(triple), graph);
-      weight_map[e] = std::get<2>(triple); 	
+
+  for (Edge triple; edge_set.try_pop(triple); ) {
+    auto [u, v, w] = triple;
+    auto [e, inserted] = add_edge(u, v, graph);
+    if (inserted) weight_map[e] = w;
   }
 
-  // Search for the vertex *v_max with the highest degree.
-  // Nominate this as the root vertex in Prim's MST algorithm
-  graph_traits<Graph>::vertex_iterator vi_curr, vi_end, v_max;
-  graph_traits<Graph>::degree_size_type max_degree = 0;
-  graph_traits<Graph>::degree_size_type curr_degree = 0;
-  for (tie(vi_curr, vi_end) = vertices(graph); vi_curr != vi_end; ++vi_curr) {
-    curr_degree = degree(*vi_curr, graph);
-    if (curr_degree >= max_degree && curr_degree <= expected_max_degree + 3) {
-      max_degree = curr_degree;
-      v_max = vi_curr;
+  // Find root vertex with highest degree (within constraint)
+  auto [vi_start, vi_end] = vertices(graph);
+  auto v_max = vi_start;
+  size_t max_degree = 0;
+
+  for (auto vi = vi_start; vi != vi_end; ++vi) {
+    size_t deg = degree(*vi, graph);
+    if (deg >= max_degree && deg <= EXPECTED_MAX_DEGREE + 3) {
+      max_degree = deg;
+      v_max = vi;
     }
   }
 
-  // Compute the minimum spanning tree with root vertex *v_max
-  property_map<Graph, vertex_distance_t>::type distance = get(vertex_distance, graph);
-  property_map<Graph, vertex_index_t>::type index_map = get(vertex_index, graph);
-  prim_minimum_spanning_tree(graph, *v_max, &p[0], distance,
-                             weight_map, index_map, default_dijkstra_visitor());
+  auto distance_map = get(vertex_distance, graph);
+  auto index_map = get(vertex_index, graph);
 
-  // Output result
-  for (size_t i = 0; i != p.size(); ++i) {
-    if (p[i] != i)
-      printf("%zu\n", p[i]);
-    else
-      printf("-1\n");
+  prim_minimum_spanning_tree(graph, *v_max,
+                             make_iterator_property_map(predecessors.begin(), index_map),
+                             distance_map, weight_map, index_map,
+                             default_dijkstra_visitor());
+
+  for (size_t i = 0; i < predecessors.size(); ++i) {
+    printf("%zu\n", (predecessors[i] != i) ? predecessors[i] : static_cast<size_t>(-1));
   }
 }
