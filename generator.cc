@@ -4,10 +4,8 @@
 // --------------------------------------------------------
 
 // C++
-#include <iostream>
 #include <fstream>
 #include <vector>
-#include <unordered_map>
 #include <numeric>
 #include <random>
 #include <ranges>
@@ -55,8 +53,7 @@ int main()
   population.reserve(POPULATION_SIZE);
   population.push_back(create_genesis_block());
 
-  unordered_map<int, int> child_to_parent;
-  child_to_parent[0] = -1;
+  vector<int> child_to_parent(POPULATION_SIZE, -1);
 
   for (int index = 1; index < GENOME_LEN; ++index) {
     int parent_index = random_parent_index(index - 1);
