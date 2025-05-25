@@ -32,35 +32,80 @@ using namespace tbb;
 // -------------------------------
 // Constants and Definitions
 // -------------------------------
-namespace {
+namespace
+{
 constexpr int GENOME_LEN = 10000;               // Bitvector genome length
+constexpr int POPULATION_SIZE = 10000;          // Population size
 constexpr double MUTATION_PROB = 0.2;           // Per-bit flip probability
 constexpr double LOG_LIKELIHOOD_CUTOFF = 20.0;  // Ignore improbable mutations
 constexpr double SCALE = 1000.0;                // Edge weight scaling
 
 using Genome = dynamic_bitset<>;
 using Edge = std::tuple<int, int, int>;              // (u, v, weight)
-concurrent_queue<Edge> edge_set;
 }
 
-// -------------------------------
-// Edge Generator Class
-// -------------------------------
-
-class CalculateEdgeWeights
+int main(int argc, char* argv[])
 {
-  const vector<Genome>& population;
-  const vector<int>& log_lut;
-  bool use_knn;
-  int knn_k;
+  bool use_knn = false;
+  int knn_k = 10;
 
-public:
-  CalculateEdgeWeights(const vector<Genome>& population, const vector<int>& lut,
-                       bool use_knn, int knn_k)
-    : population(population), log_lut(lut), use_knn(use_knn), knn_k(knn_k) {}
+  // Parse optional CLI flag: --knn N
+  for (int i = 1; i < argc; ++i) {
+    string arg = argv[i];
+    if (arg == "--knn" && i + 1 < argc) {
+      knn_k = atoi(argv[++i]);
+      use_knn = true;
+    }
+  }
 
-  void operator()(const blocked_range<int>& r) const
-  {
+  concurrent_queue<Edge> edge_set;
+  // Use max available parallelism
+  global_control control(global_control::max_allowed_parallelism, std::thread::hardware_concurrency());
+
+  constexpr char filename[] = "test.data";
+  constexpr size_t EXPECTED_MAX_DEGREE = 10;
+
+  using Graph = adjacency_list<vecS, vecS, undirectedS,
+        property<vertex_distance_t, int>,
+        property<edge_weight_t, int>>;
+  using Vertex = graph_traits<Graph>::vertex_descriptor;
+
+  Graph graph(POPULATION_SIZE);
+  auto weight_map = get(edge_weight, graph);
+  vector<Vertex> predecessors(POPULATION_SIZE);  // MST output
+
+  // ------------------------------------------
+  // Read population genomes from test.data
+  // ------------------------------------------
+
+  vector<Genome> population(POPULATION_SIZE, Genome(GENOME_LEN));
+  ifstream ifs(filename);
+  string line;
+  size_t index = 0;
+  while (getline(ifs, line) && index < POPULATION_SIZE) {
+    for (size_t i = 0; i < GENOME_LEN; ++i)
+      if (line[i] == '1') population[index].set(i);
+    ++index;
+  }
+
+  cerr << "Read " << index << " genomes.\n";
+  cerr << (use_knn ? "Using KNN sparsification (K = " + to_string(knn_k) : "Using full pairwise edge construction") << "\n";
+
+  // ------------------------------------------
+  // Precompute log-likelihoods for all d = 0..10000
+  // ------------------------------------------
+
+  cerr << "Precomputing log-likelihood table...\n";
+  vector<int> log_lut(GENOME_LEN + 1, -1); // logarithmic lookup table
+  boost::math::binomial_distribution<> binom(GENOME_LEN, MUTATION_PROB);
+  for (int d = 0; d <= GENOME_LEN; ++d) {
+    double logp = -log(boost::math::pdf(binom, d));
+    log_lut[d] = (!isfinite(logp) || logp > LOG_LIKELIHOOD_CUTOFF) ? -1
+                 : static_cast<int>(logp * SCALE);
+  }
+
+  // edge-weight calculator
+  auto calculate_edge_weights = [&](const blocked_range<int>& r) {
     for (int j = r.begin(); j < r.end(); ++j) {
       if (use_knn) {
         // Find top-k most similar ancestors for j
@@ -93,79 +138,14 @@ public:
         }
       }
     }
-  }
-};
-
-// -------------------------------
-// Main Program
-// -------------------------------
-
-int main(int argc, char* argv[])
-{
-  bool use_knn = false;
-  int knn_k = 10;
-
-  // Parse optional CLI flag: --knn N
-  for (int i = 1; i < argc; ++i) {
-    string arg = argv[i];
-    if (arg == "--knn" && i + 1 < argc) {
-      knn_k = atoi(argv[++i]);
-      use_knn = true;
-    }
-  }
-
-  // Use max available parallelism
-  global_control control(global_control::max_allowed_parallelism, std::thread::hardware_concurrency());
-
-  constexpr char filename[] = "test.data";
-  constexpr size_t EXPECTED_MAX_DEGREE = 10;
-  constexpr size_t VERTEX_COUNT = GENOME_LEN;
-
-  using Graph = adjacency_list<vecS, vecS, undirectedS,
-        property<vertex_distance_t, int>,
-        property<edge_weight_t, int>>;
-  using Vertex = graph_traits<Graph>::vertex_descriptor;
-
-  Graph graph(VERTEX_COUNT);
-  auto weight_map = get(edge_weight, graph);
-  vector<Vertex> predecessors(VERTEX_COUNT);  // MST output
-
-  // ------------------------------------------
-  // Read population genomes from test.data
-  // ------------------------------------------
-
-  vector<Genome> population(VERTEX_COUNT, Genome(GENOME_LEN));
-  ifstream ifs(filename);
-  string line;
-  size_t index = 0;
-  while (getline(ifs, line) && index < VERTEX_COUNT) {
-    for (size_t i = 0; i < GENOME_LEN; ++i)
-      if (line[i] == '1') population[index].set(i);
-    ++index;
-  }
-
-  cerr << "Read " << index << " genomes.\n";
-  cerr << (use_knn ? "Using KNN sparsification (K = " + to_string(knn_k) : "Using full pairwise edge construction") << "\n";
-
-  // ------------------------------------------
-  // Precompute log-likelihoods for all d = 0..10000
-  // ------------------------------------------
-
-  cerr << "Precomputing log-likelihood table...\n";
-  vector<int> log_lut(GENOME_LEN + 1, -1); // logarithmic lookup table
-  boost::math::binomial_distribution<> binom(GENOME_LEN, MUTATION_PROB);
-  for (int d = 0; d <= GENOME_LEN; ++d) {
-    double logp = -log(boost::math::pdf(binom, d));
-    log_lut[d] = (!isfinite(logp) || logp > LOG_LIKELIHOOD_CUTOFF) ? -1
-                 : static_cast<int>(logp * SCALE);
-  }
+  };
 
   // ------------------------------------------
   // Generate candidate edges in parallel
   // ------------------------------------------
 
-  parallel_for(blocked_range<int>(0, static_cast<int>(VERTEX_COUNT)),
-               CalculateEdgeWeights(population, log_lut, use_knn, knn_k),
+  parallel_for(blocked_range<int>(0, POPULATION_SIZE),
+               calculate_edge_weights,
                auto_partitioner());
 
   // ------------------------------------------
@@ -224,11 +204,11 @@ int main(int argc, char* argv[])
   // Genesis gets parent = -1
   // ------------------------------------------
 
-  for (size_t i = 0; i < predecessors.size(); ++i) {
-    if (predecessors[i] != i)
-      printf("%zu\n", predecessors[i]);
-    else
-      printf("-1\n");
+  for (size_t i = 0; i < POPULATION_SIZE; ++i) {
+    if (predecessors[i] != i) {
+        cout << predecessors[i] << '\n';
+    } else {
+        cout << "-1\n";
+    }
   }
-
 }
