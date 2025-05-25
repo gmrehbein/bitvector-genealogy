@@ -89,13 +89,13 @@ int main(int argc, char* argv[])
   }
 
   cerr << "Read " << index << " genomes.\n";
-  cerr << (use_knn ? "Using KNN sparsification (K = " + to_string(knn_k) : "Using full pairwise edge construction") << "\n";
+  cerr << (use_knn ? "Using KNN sparsification (K = " + to_string(knn_k) + ')'
+          : "Using full pairwise edge construction") << '\n';
 
   // ------------------------------------------
   // Precompute log-likelihoods for all d = 0..10000
   // ------------------------------------------
 
-  cerr << "Precomputing log-likelihood table...\n";
   vector<int> log_lut(GENOME_LEN + 1, -1); // logarithmic lookup table
   boost::math::binomial_distribution<> binom(GENOME_LEN, MUTATION_PROB);
   for (int d = 0; d <= GENOME_LEN; ++d) {
@@ -152,18 +152,11 @@ int main(int argc, char* argv[])
   // Construct Boost Graph from edge set
   // ------------------------------------------
 
-  cerr << "Building graph...\n";
-  size_t edge_count = 0;
   for (Edge triple; edge_set.try_pop(triple); ) {
     auto [u, v, w] = triple;
     auto [e, inserted] = add_edge(u, v, graph);
-    if (inserted) {
-      weight_map[e] = w;
-      ++edge_count;
-    }
+    if (inserted) weight_map[e] = w;
   }
-
-  cerr << "Graph built with " << edge_count << " edges.\n";
 
   // ------------------------------------------
   // Select root vertex with highest viable degree
