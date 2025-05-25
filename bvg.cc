@@ -83,30 +83,31 @@ int main(int argc, char* argv[])
   string line;
   size_t index = 0;
   while (getline(ifs, line) && index < POPULATION_SIZE) {
-    for (size_t i = 0; i < GENOME_LEN; ++i)
+    for (size_t i = 0; i < GENOME_LEN; ++i) {
       if (line[i] == '1') population[index].set(i);
+    }
     ++index;
   }
 
   cerr << "Read " << index << " genomes.\n";
   cerr << (use_knn ? "Using KNN sparsification (K = " + to_string(knn_k) + ')'
-          : "Using full pairwise edge construction") << '\n';
+           : "Using full pairwise edge construction") << '\n';
 
   // ------------------------------------------
   // Precompute log-likelihoods for all d = 0..10000
   // ------------------------------------------
 
-  vector<int> log_lut(GENOME_LEN + 1, -1); // logarithmic lookup table
+  vector<int> log_memo(GENOME_LEN + 1, -1); // logarithmic lookup table
   boost::math::binomial_distribution<> binom(GENOME_LEN, MUTATION_PROB);
   for (int d = 0; d <= GENOME_LEN; ++d) {
     double logp = -log(boost::math::pdf(binom, d));
-    log_lut[d] = (!isfinite(logp) || logp > LOG_LIKELIHOOD_CUTOFF) ? -1
-                 : static_cast<int>(logp * SCALE);
+    log_memo[d] = (!isfinite(logp) || logp > LOG_LIKELIHOOD_CUTOFF) ? -1
+                  : static_cast<int>(logp * SCALE);
   }
 
   // edge-weight calculator
-  auto calculate_edge_weights = [&](const blocked_range<int>& r) {
-    for (int j = r.begin(); j < r.end(); ++j) {
+  auto calculate_edge_weights = [&](const blocked_range<int>& block) {
+    for (int j = block.begin(); j < block.end(); ++j) {
       if (use_knn) {
         // Find top-k most similar ancestors for j
         vector<pair<int, int>> neighbors;
@@ -122,19 +123,16 @@ int main(int argc, char* argv[])
         });
 
         for (int k = 0; k < min(knn_k, (int)neighbors.size()); ++k) {
-          int i = neighbors[k].first;
-          int d = neighbors[k].second;
-          int weight = log_lut[d]; // precomputed -log P(d)
-          if (weight != -1)
-            edge_set.push({i, j, weight});
+          auto [i,d] = neighbors[k];
+          int weight = log_memo[d]; // precomputed -log P(d)
+          if (weight != -1) edge_set.push({i, j, weight});
         }
       } else {
         // Full pairwise comparison: all i < j
         for (int i = 0; i < j; ++i) {
           int d = (population[j] ^ population[i]).count();
-          int weight = log_lut[d];
-          if (weight != -1)
-            edge_set.push({i, j, weight});
+          int weight = log_memo[d];
+          if (weight != -1) edge_set.push({i, j, weight});
         }
       }
     }
@@ -199,9 +197,9 @@ int main(int argc, char* argv[])
 
   for (size_t i = 0; i < POPULATION_SIZE; ++i) {
     if (predecessors[i] != i) {
-        cout << predecessors[i] << '\n';
+      cout << predecessors[i] << '\n';
     } else {
-        cout << "-1\n";
+      cout << "-1\n";
     }
   }
 }
