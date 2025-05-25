@@ -34,17 +34,16 @@ int main()
     mt19937 gen(rd());
     bernoulli_distribution coin_toss(0.5);
     Genome genome(GENOME_LEN);
-    for (int i = 0; i < GENOME_LEN; ++i)
-    {
+    for (int i = 0; i < GENOME_LEN; ++i) {
       if (coin_toss(gen)) genome.flip(i);
     }
 
     return genome;
   };
 
-  auto random_parent_index = [&](int max_index) -> int {
+  auto pick_random_parent = [&](int upper_bound_inclusive) -> int {
     static mt19937 parent_gen(rd());
-    uniform_int_distribution<> dist(0, max_index);
+    uniform_int_distribution<> dist(0, upper_bound_inclusive);
     return dist(parent_gen);
   };
 
@@ -53,12 +52,14 @@ int main()
   population.reserve(POPULATION_SIZE);
   population.push_back(create_genesis_block());
 
+  // maps children at index i to the index of their parent
   vector<int> child_to_parent(POPULATION_SIZE, -1);
 
+  // generate the population of bitvectors
   for (int index = 1; index < GENOME_LEN; ++index) {
-    int parent_index = random_parent_index(index - 1);
+    auto parent_index = pick_random_parent(index - 1);
     child_to_parent[index] = parent_index;
-    Genome child = population[parent_index];
+    auto child = population[parent_index];
     mutate(child);
     population.push_back(child);
   }
@@ -66,7 +67,7 @@ int main()
   // Create permutation of indices
   mt19937 permutation_gen(rd());
   vector<int> population_permutation(GENOME_LEN);
-  iota(population_permutation.begin(), population_permutation.end(), 0);
+  iota(begin(population_permutation), end(population_permutation), 0);
   ranges::shuffle(population_permutation, permutation_gen);
 
   {
@@ -83,10 +84,10 @@ int main()
     for (const auto& child_index : population_permutation) {
       int parent_id = child_to_parent[child_index];
       auto it = std::ranges::find(population_permutation, parent_id);
-      if (it == population_permutation.end()) {
+      if (it == end(population_permutation)) {
         parent_output << -1 << '\n';
       } else {
-        parent_output << std::distance(population_permutation.begin(), it) << '\n';
+        parent_output << std::distance(begin(population_permutation), it) << '\n';
       }
     }
   }
