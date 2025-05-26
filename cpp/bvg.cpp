@@ -1,8 +1,6 @@
-// ---------------------------------------------------------
-// File: bvg.cc
+// File: bvg.cpp
 // Purpose: Reconstruct a degree-constrained MST from a population
 //          of BitVectors with asexual bit-flip inheritance.
-// ---------------------------------------------------------
 
 #include <algorithm>
 #include <fstream>

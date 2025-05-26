@@ -1,0 +1,11 @@
+[package]
+name = "bvg-rs"
+version = "0.1.0"
+edition = "2021"
+authors = ["Gregory <gmrehbein@gmail.com>"]
+description = "Reconstruct MST from asexual bitvector genome evolution"
+license = "MIT"
+
+[dependencies]
+rayon = "1.8"
+statrs = "0.16"
