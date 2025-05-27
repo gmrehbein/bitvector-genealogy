@@ -20,7 +20,7 @@
 #include <tbb/global_control.h>
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
-#include <tbb/concurrent_queue.h>
+#include <tbb/concurrent_vector.h>
 
 using namespace std;
 using namespace boost;
@@ -54,8 +54,7 @@ int main(int argc, char* argv[])
     }
   }
 
-
-  concurrent_queue<Edge> edge_set;
+  
 
   constexpr char filename[] = "test.data";
   // constexpr size_t EXPECTED_MAX_DEGREE = 10;
@@ -97,6 +96,7 @@ int main(int argc, char* argv[])
                     : static_cast<int>(logp * SCALE);
   }
 
+  concurrent_vector<Edge> edges;
   // edge-weight calculator
   auto calculate_edge_weights = [&](const blocked_range<int>& block) {
     for (int j = block.begin(); j < block.end(); ++j) {
@@ -104,7 +104,7 @@ int main(int argc, char* argv[])
       for (int i = 0; i < j; ++i) {
         int d = (population[j] ^ population[i]).count();
         int weight = log_lookup[d];
-        if (weight != -1) edge_set.push({i, j, weight});
+        if (weight != -1) edges.push_back({i, j, weight});
       }
     }
   };
@@ -118,7 +118,7 @@ int main(int argc, char* argv[])
                auto_partitioner());
 
   // Construct Boost Graph from edge set
-  for (Edge edge; edge_set.try_pop(edge); ) {
+  for (auto& edge : edges) {
     auto [u, v, w] = edge;
     auto [e, inserted] = add_edge(u, v, graph);
     if (inserted) weight_map[e] = w;
