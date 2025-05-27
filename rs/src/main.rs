@@ -10,13 +10,17 @@
 // 5. Constructs a degree-constrained minimum spanning tree representing evolutionary relationships
 // 6. Outputs parent-child relationships for phylogenetic reconstruction
 
+use libc::{mlock, ENOMEM, c_void};
+use std::collections::BinaryHeap;
+use std::cmp::Reverse;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::env;
-use std::sync::Mutex;
 use std::process;
-use rayon::prelude::*;
 use statrs::distribution::{Binomial, Discrete};
+
+#[cfg(target_arch = "aarch64")]
+use std::arch::aarch64::*;
 
 // Algorithm parameters
 const GENOME_LEN: usize = 10000;        // Length of each binary genome
@@ -26,6 +30,7 @@ const LOG_LIKELIHOOD_CUTOFF: f64 = 20.0; // Ignore edges with -log(p) > cutoff (
 const SCALE: f64 = 1000.0;              // Scale factor for integer edge weights
 const ZSCORE_THRESHOLD: f64 = 3.0;      // Root must be mean + 3*stddev above average degree
 
+
 // Optimized data types for performance
 type Genome = Vec<u64>;  // Use u64 chunks for fast bit operations (64x speedup vs BitVec)
 
@@ -33,8 +38,17 @@ type Genome = Vec<u64>;  // Use u64 chunks for fast bit operations (64x speedup 
 const BITS_PER_CHUNK: usize = 64;
 const CHUNKS: usize = (GENOME_LEN + BITS_PER_CHUNK - 1) / BITS_PER_CHUNK;
 
+// M1-optimized parameters
+// M1 has 128KB L1 cache, so we optimize chunk size to fit multiple genomes
+// Each genome is CHUNKS * 8 bytes, so we can fit M1_L1_CACHE_SIZE / (CHUNKS * 8) genomes in L1 cache
+// This allows us to process multiple genomes in parallel without cache misses
+const M1_L1_CACHE_SIZE: usize = 128 * 1024;
+const GENOMES_PER_L1_BATCH: usize = M1_L1_CACHE_SIZE / (CHUNKS * 8);
+
+// M1-optimized chunk size
+const M1_OPTIMAL_CHUNK_SIZE: usize = 512;
+
 /// Configuration struct to hold all program parameters
-#[derive(Debug)]
 struct Config {
     input_file: String,
     output_file: String,
@@ -52,7 +66,12 @@ impl Default for Config {
             output_file: "out.txt".to_string(),
             zscore_threshold: ZSCORE_THRESHOLD,
             log_likelihood_cutoff: LOG_LIKELIHOOD_CUTOFF,
-            chunk_size: 100,
+            //the number of genomes processed per thread in each parallel batch
+            chunk_size: if cfg!(target_arch = "aarch64") {
+                M1_OPTIMAL_CHUNK_SIZE
+            } else {
+                100
+            },
             threads: None,
             verbose: false,
         }
@@ -64,7 +83,7 @@ fn parse_args() -> Config {
     let args: Vec<String> = env::args().collect();
     let mut config = Config::default();
     let mut i = 1;
-    
+
     while i < args.len() {
         match args[i].as_str() {
             "-h" | "--help" => {
@@ -163,7 +182,7 @@ fn parse_args() -> Config {
             }
         }
     }
-    
+
     config
 }
 
@@ -213,11 +232,11 @@ fn read_population(filename: &str) -> Vec<Genome> {
     let file = File::open(filename).expect("Failed to open input file");
     let reader = BufReader::new(file);
     let mut population = Vec::with_capacity(POPULATION_SIZE);
-    
+
     for line in reader.lines().take(POPULATION_SIZE) {
         let line = line.unwrap();
         let mut genome = vec![0u64; CHUNKS];
-        
+
         // Pack bits into u64 chunks for fast XOR operations
         for (i, c) in line.chars().take(GENOME_LEN).enumerate() {
             if c == '1' {
@@ -228,7 +247,7 @@ fn read_population(filename: &str) -> Vec<Genome> {
         }
         population.push(genome);
     }
-    
+
     population
 }
 
@@ -239,11 +258,11 @@ fn read_population(filename: &str) -> Vec<Genome> {
 fn compute_log_lookup_table(cutoff: f64) -> Vec<Option<i32>> {
     let binom = Binomial::new(MUTATION_PROB, GENOME_LEN as u64).unwrap();
     let mut log_lookup = Vec::with_capacity(GENOME_LEN + 1);
-    
+
     for d in 0..=GENOME_LEN {
         let p = binom.pmf(d as u64);  // Probability of exactly d mutations
         let logp = -p.ln();           // Negative log-likelihood (lower = more likely)
-        
+
         // Filter out impossible/improbable mutations
         if !logp.is_finite() || logp > cutoff {
             log_lookup.push(None);  // Don't create edge for this distance
@@ -251,7 +270,7 @@ fn compute_log_lookup_table(cutoff: f64) -> Vec<Option<i32>> {
             log_lookup.push(Some((logp * SCALE) as i32));  // Scale to integer weights
         }
     }
-    
+
     log_lookup
 }
 
@@ -266,6 +285,78 @@ fn hamming_distance(a: &Genome, b: &Genome) -> usize {
         .sum()
 }
 
+/// SIMD-optimized Hamming distance using NEON intrinsics for AArch64
+/// This version uses NEON intrinsics to process 128 bits (2 u64s) at a time,
+/// significantly speeding up the Hamming distance calculation on AArch64
+// NEON-optimized version only compiled on aarch64
+#[inline]
+#[cfg(target_arch = "aarch64")]
+#[target_feature(enable = "neon")]
+fn hamming_distance_neon(a: &Genome, b: &Genome) -> usize {
+    a.chunks_exact(2)
+        .zip(b.chunks_exact(2))
+        .map(|(a_chunk, b_chunk)| {
+            unsafe {
+                // Load 2 u64s into a 128-bit NEON register
+                let va = vld1q_u64(a_chunk.as_ptr());
+                let vb = vld1q_u64(b_chunk.as_ptr());
+
+                // XOR and count bits
+                let xor = veorq_u64(va, vb);
+                let count = vcnt_u8(vreinterpretq_u8_u64(xor));
+                let sum = vpaddlq_u16(vpaddlq_u8(count));
+
+                vgetq_lane_u64(sum, 0) as usize + vgetq_lane_u64(sum, 1) as usize
+            }
+        })
+        .sum::<usize>()
+        + a.chunks_exact(2).remainder()
+            .iter()
+            .zip(b.chunks_exact(2).remainder())
+            .map(|(x, y)| (x ^ y).count_ones() as usize)
+            .sum::<usize>()
+}
+
+// Dispatching function that chooses the right implementation
+#[inline]
+fn hamming_distance_optimized(a: &Genome, b: &Genome) -> usize {
+    #[cfg(target_arch = "aarch64")]
+    {
+        unsafe { hamming_distance_neon(a, b) }
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        hamming_distance(a, b)
+    }
+}
+
+fn lock_population_memory(population: &[Genome]) -> bool {
+    let total_size = population.len() * std::mem::size_of::<Genome>();
+
+    if total_size < 50 * 1024 * 1024 { // Less than 50MB, don't bother
+        return false;
+    }
+
+    unsafe {
+        let ptr = population.as_ptr() as *const c_void;
+        let result = mlock(ptr, total_size);
+
+        if result == 0 {
+            eprintln!("Locked {}MB of genome data in memory", total_size / (1024 * 1024));
+            true
+        } else {
+            let errno = *libc::__error();
+            if errno == ENOMEM {
+                eprintln!("Warning: Could not lock memory (insufficient privileges or memory)");
+            } else {
+                eprintln!("Warning: mlock failed with errno {}", errno);
+            }
+            false
+        }
+    }
+}
+
 /// Simple adjacency list graph representation optimized for this use case
 /// Much faster than generic graph libraries due to cache-friendly memory layout
 struct SimpleGraph {
@@ -278,18 +369,18 @@ impl SimpleGraph {
             edges: vec![Vec::new(); n],
         }
     }
-    
+
     /// Add undirected edge with given weight
     fn add_edge(&mut self, u: usize, v: usize, weight: i32) {
         self.edges[u].push((v, weight));
         self.edges[v].push((u, weight));
     }
-    
+
     /// Get degree (number of neighbors) for node u
     fn degree(&self, u: usize) -> usize {
         self.edges[u].len()
     }
-    
+
     /// Get all neighbors of node u with their edge weights
     fn neighbors(&self, u: usize) -> &[(usize, i32)] {
         &self.edges[u]
@@ -300,52 +391,78 @@ impl SimpleGraph {
 /// Returns parent array where parent[i] is the parent of node i in the MST
 /// Root node has parent[root] = None
 fn prim_mst(graph: &SimpleGraph, root: usize) -> Vec<Option<usize>> {
+    // for SimpleGraph uncomment
     let n = graph.edges.len();
-    let mut in_mst = vec![false; n];      // Track which nodes are in MST
-    let mut parent = vec![None; n];       // Parent of each node in MST
-    let mut min_cost = vec![i32::MAX; n]; // Minimum cost to connect each node
-    
-    min_cost[root] = 0;  // Start from root with zero cost
-    
-    // Add nodes to MST one by one
-    for _ in 0..n {
-        // Find minimum cost vertex not yet in MST
-        let mut u = 0;
-        let mut min_val = i32::MAX;
-        
-        for v in 0..n {
-            if !in_mst[v] && min_cost[v] < min_val {
-                min_val = min_cost[v];
-                u = v;
-            }
-        }
-        
-        in_mst[u] = true;  // Add u to MST
-        
-        // Update costs of vertices adjacent to u
+    let mut in_mst = vec![false; n];
+    let mut parent = vec![None; n];
+    let mut heap = BinaryHeap::new();
+
+    heap.push(Reverse((0i32, root, None)));
+
+    while let Some(Reverse((_, u, p))) = heap.pop() {
+        if in_mst[u] { continue; }
+
+        in_mst[u] = true;
+        parent[u] = p;
+
         for &(v, weight) in graph.neighbors(u) {
-            if !in_mst[v] && weight < min_cost[v] {
-                min_cost[v] = weight;
-                parent[v] = Some(u);  // u is now the best parent for v
+            if !in_mst[v] {
+                heap.push(Reverse((weight, v, Some(u))));
             }
         }
     }
-    
+
     parent
+}
+
+fn compute_distances(
+    population: &[Genome],
+    log_lookup: &[Option<i32>],
+    chunk_size: usize
+) -> Vec<(usize, usize, i32)> {
+    use std::sync::Mutex;
+    use rayon::prelude::*;
+
+    // Pre-allocate capacity to avoid reallocations
+    let total_pairs = POPULATION_SIZE * ( POPULATION_SIZE - 1) / 2;
+    let estimated_edges = (total_pairs as f64 * 0.1) as usize;
+    let edges = Mutex::new(Vec::with_capacity(estimated_edges));
+
+    (0..population.len())
+        .into_par_iter()
+        .chunks(chunk_size)
+        .for_each(|chunk| {
+            let mut local_edges = Vec::new();
+
+            for j in chunk {
+                for i in 0..j {
+                    let d = hamming_distance_optimized(&population[i], &population[j]);
+                    if let Some(weight) = log_lookup.get(d).and_then(|&w| w) {
+                        local_edges.push((i, j, weight));
+                    }
+                }
+            }
+
+            edges.lock().unwrap().extend(local_edges);
+        });
+
+    edges.into_inner().unwrap()
 }
 
 fn main() {
     // Parse command line arguments
     let config = parse_args();
-    
+
+
     // Set thread count if specified
+
     if let Some(threads) = config.threads {
         rayon::ThreadPoolBuilder::new()
             .num_threads(threads)
             .build_global()
             .unwrap();
     }
-    
+
     if config.verbose {
         eprintln!("Configuration:");
         eprintln!("  Input file: {}", config.input_file);
@@ -357,61 +474,43 @@ fn main() {
         eprintln!("  Threads: {}", rayon::current_num_threads());
         eprintln!();
     }
-    
+
     // Read population genomes from input file
     if config.verbose {
         eprintln!("Reading genomes from {}...", config.input_file);
     }
     let population = read_population(&config.input_file);
     eprintln!("Read {} genomes", population.len());
-    
+
+    let _locked = lock_population_memory(&population);
+
     // Precompute log-likelihood scores for Hamming distances
     if config.verbose {
         eprintln!("Computing mutation model lookup table...");
     }
     let log_lookup = compute_log_lookup_table(config.log_likelihood_cutoff);
-    
+
     // Compute all pairwise evolutionary distances in parallel
     // This is O(n²) but highly parallelizable - each thread processes chunks of genome pairs
     // Uses chunked processing to reduce lock contention on the shared edge vector
     if config.verbose {
-        eprintln!("Computing pairwise distances...");
+        eprintln!("Computing pairwise distances with cache-friendly blocking...");
+        eprintln!("  Cache block size: {} genomes", GENOMES_PER_L1_BATCH);
     }
-    
-    let edges = Mutex::new(Vec::new());
-    
-    (0..POPULATION_SIZE)
-        .into_par_iter()
-        .chunks(config.chunk_size)
-        .for_each(|chunk| {
-            let mut local_edges = Vec::new();
-            
-            // For each genome j in this chunk, compare with all previous genomes i < j
-            for j in chunk {
-                for i in 0..j {
-                    let d = hamming_distance(&population[i], &population[j]);
-                    if let Some(weight) = log_lookup[d] {
-                        local_edges.push((i, j, weight));
-                    }
-                }
-            }
-            
-            // Batch insert to reduce lock contention (much faster than individual pushes)
-            edges.lock().unwrap().extend(local_edges);
-        });
-    
-    let edges = edges.into_inner().unwrap();
+
+    let edges = compute_distances(&population, &log_lookup, config.chunk_size);
     eprintln!("Generated {} edges", edges.len());
-    
+
     // Build graph from computed edges
     if config.verbose {
         eprintln!("Building graph...");
     }
+
     let mut graph = SimpleGraph::new(POPULATION_SIZE);
-    for (u, v, weight) in edges {
+     for (u, v, weight) in edges {
         graph.add_edge(u, v, weight);
     }
-    
+
     // Calculate degree statistics for root selection
     // We want to find genomes with unusually high connectivity (potential ancestors)
     if config.verbose {
@@ -420,7 +519,7 @@ fn main() {
     let degrees: Vec<usize> = (0..POPULATION_SIZE)
         .map(|i| graph.degree(i))
         .collect();
-    
+
     let mean: f64 = degrees.iter().sum::<usize>() as f64 / POPULATION_SIZE as f64;
     let variance: f64 = degrees.iter()
         .map(|&d| {
@@ -429,9 +528,9 @@ fn main() {
         })
         .sum::<f64>() / POPULATION_SIZE as f64;
     let stddev = variance.sqrt();
-    
+
     let threshold = mean + config.zscore_threshold * stddev;
-    
+
     if config.verbose {
         eprintln!("Degree statistics:");
         eprintln!("  Mean: {:.2}", mean);
@@ -440,18 +539,18 @@ fn main() {
     } else {
         eprintln!("threshold = {}", threshold);
     }
-    
+
     // Select the MST root as a high-degree statistical outlier
     // Rationale: Ancestral genomes should have many descendants, leading to high connectivity
     // We require degree >= mean + zscore_threshold * stddev to avoid noise
     if config.verbose {
         eprintln!("Selecting root node...");
     }
-    
+
     let mut root_idx = 0;
     let mut max_degree = 0;
     let mut root_found = false;
-    
+
     for (i, &deg) in degrees.iter().enumerate() {
         if deg >= max_degree && deg as f64 >= threshold {
             max_degree = deg;
@@ -459,7 +558,7 @@ fn main() {
             root_found = true;
         }
     }
-    
+
     if !root_found {
         eprintln!("ERROR: No suitable root vertex found.");
         if config.verbose {
@@ -469,28 +568,29 @@ fn main() {
         }
         process::exit(1);
     }
-    
+
     eprintln!("Selected root {}. Degree = {}", root_idx, max_degree);
-    
+
     // Build MST using optimized Prim's algorithm
     // This creates a tree structure representing the most likely evolutionary relationships
     if config.verbose {
         eprintln!("Computing minimum spanning tree...");
     }
+
     let predecessors = prim_mst(&graph, root_idx);
-    
+
     // Output phylogenetic tree in parent-index format
     // Each line i contains the parent of genome i, or -1 if i is the root
     if config.verbose {
         eprintln!("Writing results to {}...", config.output_file);
     }
-    
+
     let mut output = File::create(&config.output_file)
         .unwrap_or_else(|e| {
             eprintln!("Error creating output file {}: {}", config.output_file, e);
             process::exit(1);
         });
-    
+
     for i in 0..POPULATION_SIZE {
         if let Some(parent_idx) = predecessors[i] {
             if parent_idx == i {
@@ -502,7 +602,7 @@ fn main() {
             writeln!(output, "-1").unwrap();  // Shouldn't happen with proper MST, but handle gracefully
         }
     }
-    
+
     if config.verbose {
         eprintln!("Phylogenetic reconstruction complete!");
     }
